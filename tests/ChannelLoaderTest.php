@@ -79,7 +79,7 @@ PHP);
 
         $this->assertCount(2, $registry->rules());
 
-        $request = $this->createMock(ServerRequestInterface::class);
+        $request = $this->createStub(ServerRequestInterface::class);
         $request->method('getAttribute')->willReturnCallback(
             static fn (string $name, mixed $default = null): mixed => $default,
         );
