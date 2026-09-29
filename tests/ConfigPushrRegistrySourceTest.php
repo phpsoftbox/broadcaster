@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace PhpSoftBox\Broadcaster\Tests;
 
 use PhpSoftBox\Broadcaster\Registry\ConfigPushrRegistrySource;
-use PhpSoftBox\Broadcaster\Tests\Fixtures\TestEnvironment;
 use PhpSoftBox\Config\Config;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\CoversMethod;
@@ -25,7 +24,6 @@ final class ConfigPushrRegistrySourceTest extends TestCase
     public function testReadsAppsFromConfigAndDefaultCredentials(): void
     {
         $config = new Config(
-            TestEnvironment::Test,
             [[
                 'pushr' => [
                     'apps' => [
@@ -54,7 +52,6 @@ final class ConfigPushrRegistrySourceTest extends TestCase
     public function testWithoutDefaultAppSkipsDefaultCredentials(): void
     {
         $config = new Config(
-            TestEnvironment::Test,
             [[
                 'pushr' => [
                     'apps' => [

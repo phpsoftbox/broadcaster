@@ -54,7 +54,7 @@ final class PushrHttpEndpointsTest extends TestCase
     {
         $service = new PushrHttpEndpoints(new ChannelRegistry(), 'app-1', 'secret-1');
 
-        $request = $this->createMock(ServerRequestInterface::class);
+        $request = $this->createStub(ServerRequestInterface::class);
         $result  = $service->auth([], $request);
 
         $this->assertSame(422, $result->status());
@@ -69,7 +69,7 @@ final class PushrHttpEndpointsTest extends TestCase
         $registry->channel('private.user.{userId}', static fn (): bool => false);
 
         $service = new PushrHttpEndpoints($registry, 'app-1', 'secret-1');
-        $request = $this->createMock(ServerRequestInterface::class);
+        $request = $this->createStub(ServerRequestInterface::class);
         $result  = $service->auth([
             'socket_id' => 'socket-1',
             'channel'   => 'private.user.10',
@@ -94,7 +94,7 @@ final class PushrHttpEndpointsTest extends TestCase
 
         $service = new PushrHttpEndpoints($registry, 'app-1', 'secret-1');
 
-        $request = $this->createMock(ServerRequestInterface::class);
+        $request = $this->createStub(ServerRequestInterface::class);
         $request->method('getAttribute')->willReturnCallback(
             static fn (string $name, mixed $default = null): mixed => $name === 'user_id' ? '10' : $default,
         );

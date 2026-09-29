@@ -25,7 +25,7 @@ final class ChannelRegistryTest extends TestCase
             return (string) $request->getAttribute('user_id') === $userId;
         });
 
-        $request = $this->createMock(ServerRequestInterface::class);
+        $request = $this->createStub(ServerRequestInterface::class);
         $request->method('getAttribute')->willReturnCallback(
             static fn (string $name, mixed $default = null): mixed => $name === 'user_id' ? '10' : $default,
         );
@@ -43,7 +43,7 @@ final class ChannelRegistryTest extends TestCase
     {
         $registry = new ChannelRegistry();
 
-        $request = $this->createMock(ServerRequestInterface::class);
+        $request = $this->createStub(ServerRequestInterface::class);
         $request->method('getAttribute')->willReturnCallback(
             static fn (string $name, mixed $default = null): mixed => $default,
         );
