@@ -18,6 +18,8 @@ final class PushrConnection
         $socket,
         public readonly string $id,
         public readonly string $appId,
+        /** Соединение бэкенда с подписью публикатора: только ему разрешён `publish`. */
+        public readonly bool $publisher = false,
     ) {
         $this->socket = $socket;
     }

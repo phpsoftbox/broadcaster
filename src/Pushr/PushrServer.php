@@ -140,7 +140,11 @@ final class PushrServer
             return;
         }
 
-        if (!PushrSignature::verify($appId, $secret, $timestamp, $signature, $this->maxSkew)) {
+        $publisher = ($query['role'] ?? null) === 'publisher';
+        $verified  = $publisher
+            ? PushrSignature::verifyPublisher($appId, $secret, $timestamp, $signature, $this->maxSkew)
+            : PushrSignature::verify($appId, $secret, $timestamp, $signature, $this->maxSkew);
+        if (!$verified) {
             $this->reject($socket, 401, 'Invalid signature');
 
             return;
@@ -164,7 +168,7 @@ final class PushrServer
         stream_set_blocking($socket, false);
 
         $id     = bin2hex(random_bytes(8));
-        $client = new PushrConnection($socket, $id, $appId);
+        $client = new PushrConnection($socket, $id, $appId, $publisher);
 
         $this->clients[(int) $socket] = $client;
 
@@ -258,38 +262,22 @@ final class PushrServer
         }
 
         if ($type === 'publish' && isset($data['channel'])) {
-            $channel     = (string) $data['channel'];
-            $event       = isset($data['event']) ? (string) $data['event'] : 'message';
-            $payloadData = $data['data'] ?? null;
+            // Публикует только бэкенд: auth канала выдаётся браузеру для подписки, и с ним подписчик
+            // мог бы рассылать поддельные события остальным.
+            if (!$client->publisher) {
+                $this->send($client, ['type' => 'error', 'message' => 'Publish is not allowed for this connection']);
 
-            if ($this->requiresChannelAuth($channel)) {
-                $secret = $this->apps->secret($client->appId);
-                if ($secret === null) {
-                    $this->send($client, ['type' => 'error', 'message' => 'Unauthorized channel']);
-
-                    return;
-                }
-
-                $auth        = isset($data['auth']) ? (string) $data['auth'] : '';
-                $channelData = $data['channel_data'] ?? null;
-                if ($auth === '') {
-                    $this->send($client, ['type' => 'error', 'message' => 'Channel publish auth is required']);
-
-                    return;
-                }
-
-                if (!PushrChannelAuth::verify($client->appId, $secret, $client->id, $channel, $auth, $channelData)) {
-                    $this->send($client, ['type' => 'error', 'message' => 'Invalid channel publish auth']);
-
-                    return;
-                }
+                return;
             }
+
+            $channel = (string) $data['channel'];
+            $event   = isset($data['event']) ? (string) $data['event'] : 'message';
 
             $this->broadcast($client->appId, $channel, [
                 'type'    => 'event',
                 'channel' => $channel,
                 'event'   => $event,
-                'data'    => $payloadData,
+                'data'    => $data['data'] ?? null,
             ]);
         }
     }

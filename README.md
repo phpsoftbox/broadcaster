@@ -51,13 +51,15 @@ $publisher = new PushrPublisher(
     options: new PushrPublisherOptions(
         connectTimeoutSeconds: 0.5,
         handshakeTimeoutSeconds: 0.5,
-        readTimeoutSeconds: 0.5,
         writeTimeoutSeconds: 0.5,
     ),
 );
 $publisher->publish('news', 'message', ['text' => 'hello']);
 $publisher->publishMany(['news', 'private.user.10'], 'message', ['text' => 'hello']);
 ```
+
+`PushrClient` и `PushrPublisher` подключаются как публикатор (`role=publisher`, отдельная подпись из секрета);
+браузерные соединения с подписью от `/broadcast/connect` публиковать не могут — только подписываться.
 
 `publishMany()` открывает одно соединение для всех каналов. Синхронный publisher
 не скрывает ошибки: приложение само решает, должна ли ошибка публикации прервать
