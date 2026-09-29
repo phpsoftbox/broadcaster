@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace PhpSoftBox\Broadcaster\Pushr;
 
+use InvalidArgumentException;
+
 use function chr;
 use function is_array;
 use function ord;
@@ -16,9 +18,12 @@ use function unpack;
 final class WebSocketFrame
 {
     /**
+     * @param int|null $maxLength Максимальная длина payload; при превышении или некорректной (отрицательной
+     *                            в 64-битном поле) длине — InvalidArgumentException.
+     *
      * @return array{payload:string,opcode:int,frameLength:int}|null
      */
-    public static function decode(string $buffer): ?array
+    public static function decode(string $buffer, ?int $maxLength = null): ?array
     {
         if (strlen($buffer) < 2) {
             return null;
@@ -45,6 +50,10 @@ final class WebSocketFrame
             $lengthParts = unpack('J', substr($buffer, 2, 8));
             $length      = is_array($lengthParts) ? (int) ($lengthParts[1] ?? 0) : 0;
             $offset      = 10;
+        }
+
+        if ($length < 0 || ($maxLength !== null && $length > $maxLength)) {
+            throw new InvalidArgumentException('WebSocket frame length is invalid or exceeds the limit.');
         }
 
         $mask = '';

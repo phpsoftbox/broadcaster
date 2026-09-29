@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace PhpSoftBox\Broadcaster\Pushr;
 
+use InvalidArgumentException;
 use JsonException;
 use RuntimeException;
 
+use function array_shift;
 use function base64_encode;
 use function bin2hex;
 use function count;
@@ -23,11 +25,11 @@ use function parse_url;
 use function random_bytes;
 use function sprintf;
 use function str_starts_with;
-use function stream_get_line;
 use function stream_select;
 use function stream_set_blocking;
 use function stream_socket_accept;
 use function stream_socket_server;
+use function strlen;
 use function strpos;
 use function strtolower;
 use function substr;
@@ -40,11 +42,18 @@ use const JSON_UNESCAPED_UNICODE;
 
 final class PushrServer
 {
+    private const int HANDSHAKE_TIMEOUT_SECONDS = 5;
+    private const int MAX_HANDSHAKE_BYTES       = 16384;
+    private const int MAX_FRAME_BYTES           = 1048576;
+
     /** @var array<int, PushrConnection> */
     private array $clients = [];
 
     /** @var array<string, array<string, array<string, true>>> app_id => channel => client_id */
     private array $channels = [];
+
+    /** @var array<int, array{socket:resource, buffer:string, deadline:int}> незавершённые HTTP-handshake */
+    private array $handshakes = [];
 
     public function __construct(
         private readonly PushrAppRegistry $apps,
@@ -64,7 +73,12 @@ final class PushrServer
         stream_set_blocking($server, false);
 
         while (true) {
+            $this->dropExpiredHandshakes();
+
             $read = [$server];
+            foreach ($this->handshakes as $handshake) {
+                $read[] = $handshake['socket'];
+            }
             foreach ($this->clients as $client) {
                 $read[] = $client->socket;
             }
@@ -81,50 +95,136 @@ final class PushrServer
                     continue;
                 }
 
+                if (isset($this->handshakes[(int) $socket])) {
+                    $this->readHandshake($socket);
+                    continue;
+                }
+
                 $client = $this->findClientBySocket($socket);
                 if ($client === null) {
                     fclose($socket);
                     continue;
                 }
 
-                $data = fread($socket, 8192);
-                if ($data === '' || $data === false) {
-                    $this->close($client);
-                    continue;
-                }
-
-                $client->buffer .= $data;
-                while (true) {
-                    $frame = WebSocketFrame::decode($client->buffer);
-                    if ($frame === null) {
-                        break;
-                    }
-
-                    $client->buffer = substr($client->buffer, $frame['frameLength']);
-                    $this->handleFrame($client, $frame['opcode'], $frame['payload']);
-                }
+                $this->readClient($client);
             }
         }
     }
 
+    /**
+     * Принимает TCP-соединение без ожидания запроса: handshake дочитывается из цикла select, чтобы медленный
+     * или молчащий клиент не блокировал остальных.
+     */
     private function accept($server): void
     {
-        $socket = stream_socket_accept($server, 0);
+        $socket = @stream_socket_accept($server, 0);
         if ($socket === false) {
             return;
         }
 
-        stream_set_blocking($socket, true);
-        $request = $this->readHttpRequest($socket);
+        stream_set_blocking($socket, false);
+
+        $this->handshakes[(int) $socket] = [
+            'socket'   => $socket,
+            'buffer'   => '',
+            'deadline' => time() + self::HANDSHAKE_TIMEOUT_SECONDS,
+        ];
+    }
+
+    private function readHandshake($socket): void
+    {
+        $key  = (int) $socket;
+        $data = fread($socket, 8192);
+        if ($data === '' || $data === false) {
+            unset($this->handshakes[$key]);
+            fclose($socket);
+
+            return;
+        }
+
+        $buffer = $this->handshakes[$key]['buffer'] . $data;
+        $end    = strpos($buffer, "\r\n\r\n");
+        if ($end === false) {
+            if (strlen($buffer) > self::MAX_HANDSHAKE_BYTES) {
+                unset($this->handshakes[$key]);
+                $this->reject($socket, 431, 'Request Header Fields Too Large');
+
+                return;
+            }
+
+            $this->handshakes[$key]['buffer'] = $buffer;
+
+            return;
+        }
+
+        unset($this->handshakes[$key]);
+
+        $request = $this->parseHttpRequest(substr($buffer, 0, $end));
         if ($request === null) {
             fclose($socket);
 
             return;
         }
 
-        [$path, $headers] = $request;
-        $query            = [];
-        $urlParts         = parse_url($path);
+        $this->completeHandshake($socket, $request[0], $request[1]);
+    }
+
+    private function dropExpiredHandshakes(): void
+    {
+        $now = time();
+        foreach ($this->handshakes as $key => $handshake) {
+            if ($handshake['deadline'] >= $now) {
+                continue;
+            }
+
+            unset($this->handshakes[$key]);
+            fclose($handshake['socket']);
+        }
+    }
+
+    private function readClient(PushrConnection $client): void
+    {
+        $data = fread($client->socket, 8192);
+        if ($data === '' || $data === false) {
+            $this->close($client);
+
+            return;
+        }
+
+        $client->buffer .= $data;
+        while (true) {
+            try {
+                $frame = WebSocketFrame::decode($client->buffer, self::MAX_FRAME_BYTES);
+            } catch (InvalidArgumentException) {
+                // Некорректная или слишком большая длина кадра: без закрытия буфер рос бы бесконечно.
+                $this->close($client);
+
+                return;
+            }
+
+            if ($frame === null) {
+                if (strlen($client->buffer) > self::MAX_FRAME_BYTES + 14) {
+                    $this->close($client);
+                }
+
+                return;
+            }
+
+            $client->buffer = substr($client->buffer, $frame['frameLength']);
+            $this->handleFrame($client, $frame['opcode'], $frame['payload']);
+            if (!isset($this->clients[(int) $client->socket])) {
+                return;
+            }
+        }
+    }
+
+    /**
+     * @param array<string, string> $headers
+     */
+    private function completeHandshake($socket, string $path, array $headers): void
+    {
+        $query    = [];
+        $urlParts = parse_url($path);
         if (is_array($urlParts) && isset($urlParts['query'])) {
             parse_str((string) $urlParts['query'], $query);
         }
@@ -165,8 +265,6 @@ final class PushrServer
         $response .= "Sec-WebSocket-Accept: {$accept}\r\n\r\n";
         fwrite($socket, $response);
 
-        stream_set_blocking($socket, false);
-
         $id     = bin2hex(random_bytes(8));
         $client = new PushrConnection($socket, $id, $appId, $publisher);
 
@@ -179,38 +277,28 @@ final class PushrServer
         ]);
     }
 
-    private function readHttpRequest($socket): ?array
+    /**
+     * @return array{0:string, 1:array<string, string>}|null
+     */
+    private function parseHttpRequest(string $head): ?array
     {
-        $line = stream_get_line($socket, 4096, "\r\n");
-        if ($line === false || $line === '') {
-            return null;
-        }
-
-        $parts = explode(' ', $line, 3);
+        $lines = explode("\r\n", $head);
+        $parts = explode(' ', (string) array_shift($lines), 3);
         if (count($parts) < 2) {
             return null;
         }
 
-        $path    = $parts[1];
         $headers = [];
-
-        while (true) {
-            $header = stream_get_line($socket, 4096, "\r\n");
-            if ($header === false || $header === '') {
-                break;
-            }
-
+        foreach ($lines as $header) {
             $pos = strpos($header, ':');
             if ($pos === false) {
                 continue;
             }
 
-            $name           = strtolower(trim(substr($header, 0, $pos)));
-            $value          = trim(substr($header, $pos + 1));
-            $headers[$name] = $value;
+            $headers[strtolower(trim(substr($header, 0, $pos)))] = trim(substr($header, $pos + 1));
         }
 
-        return [$path, $headers];
+        return [$parts[1], $headers];
     }
 
     private function reject($socket, int $status, string $message): void

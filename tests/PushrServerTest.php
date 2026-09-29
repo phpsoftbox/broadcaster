@@ -26,6 +26,7 @@ use function http_build_query;
 use function is_array;
 use function json_decode;
 use function json_encode;
+use function stream_select;
 use function stream_set_blocking;
 use function stream_socket_client;
 use function stream_socket_get_name;
@@ -199,6 +200,43 @@ final class PushrServerTest extends TestCase
     }
 
     /**
+     * Проверим, что кадр с некорректной 64-битной длиной закрывает соединение, а не зацикливает сервер
+     * (раньше frameLength мог стать нулевым, и цикл разбора буфера не завершался).
+     *
+     * @see PushrServer::run()
+     * @see WebSocketFrame::decode()
+     */
+    #[Test]
+    public function frameWithInvalidLengthClosesConnection(): void
+    {
+        $server = new PushrServer(new PushrAppRegistry(['tenant-a' => 'secret-a']));
+
+        [$client, $peer] = $this->createClientPair('socket-a', 'tenant-a');
+
+        try {
+            $this->setClients($server, [$client]);
+
+            // Длина 0xFFFFFFFFFFFFFFF6 = -10 после unpack('J'): offset 10 + длина = 0.
+            fwrite($peer, "\x81\x7F\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xF6");
+            usleep(10000);
+
+            $clients = (Closure::bind(
+                static function (PushrServer $server, PushrConnection $client): array {
+                    $server->readClient($client);
+
+                    return $server->clients;
+                },
+                null,
+                PushrServer::class,
+            ))($server, $client);
+
+            self::assertSame([], $clients);
+        } finally {
+            fclose($peer);
+        }
+    }
+
+    /**
      * Выполняет handshake через настоящий TCP-сокет и возвращает созданное сервером соединение и ответ.
      *
      * @return array{0:?PushrConnection, 1:string}
@@ -227,7 +265,14 @@ final class PushrServerTest extends TestCase
 
             $connection = (Closure::bind(
                 static function (PushrServer $server, mixed $listener): ?PushrConnection {
+                    // Сервер принимает соединение без чтения и дочитывает handshake, когда сокет готов (как в run()).
                     $server->accept($listener);
+                    $socket = array_values($server->handshakes)[0]['socket'];
+                    $read   = [$socket];
+                    $write  = null;
+                    $except = null;
+                    stream_select($read, $write, $except, 1);
+                    $server->readHandshake($socket);
 
                     return array_values($server->clients)[0] ?? null;
                 },
