@@ -52,7 +52,7 @@ final class PushrSubscriptionOrderTest extends TestCase
 
         try {
             $server = new PushrServer(new PushrAppRegistry(['app' => 'secret']));
-            $client = new PushrConnection($socket, 'socket-1', 'app');
+            $client = new PushrConnection($socket, 'socket-1', 'app', publisher: true);
 
             new ReflectionProperty(PushrServer::class, 'clients')->setValue($server, [(int) $socket => $client]);
 

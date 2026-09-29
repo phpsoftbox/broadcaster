@@ -11,7 +11,6 @@ final readonly class PushrPublisherOptions
     public function __construct(
         public float $connectTimeoutSeconds = 1.0,
         public float $handshakeTimeoutSeconds = 1.0,
-        public float $readTimeoutSeconds = 1.0,
         public float $writeTimeoutSeconds = 1.0,
     ) {
         if ($this->connectTimeoutSeconds <= 0) {
@@ -20,10 +19,6 @@ final readonly class PushrPublisherOptions
 
         if ($this->handshakeTimeoutSeconds <= 0) {
             throw new InvalidArgumentException('Pushr handshake timeout must be greater than zero.');
-        }
-
-        if ($this->readTimeoutSeconds <= 0) {
-            throw new InvalidArgumentException('Pushr read timeout must be greater than zero.');
         }
 
         if ($this->writeTimeoutSeconds <= 0) {

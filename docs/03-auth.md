@@ -107,20 +107,25 @@ return new JsonResponse($result->payload(), $result->status());
 }
 ```
 
-### Публикация в приватные каналы
+### Публикация
 
-Публикация в `private.*` и `presence.*` каналы тоже требует `auth`.
-Обычно этот `auth` генерируется только на бэкенде — фронтенд не должен уметь публиковать напрямую.
+Публиковать может только бэкенд. Соединение публикатора подключается с `role=publisher` и отдельной подписью:
 
-Пример:
+```
+publisher_signature = HMAC_SHA256("publisher:" + app_id + ":" + timestamp, secret)
+```
+
+Её формирует `PushrClient` (и `PushrPublisher`) из секрета; браузер получает от `/broadcast/connect` только обычную
+подпись. Сообщение `publish` от соединения без подписи публикатора отклоняется ошибкой
+`Publish is not allowed for this connection` — иначе подписчик приватного канала, получивший `auth` для подписки,
+мог бы рассылать поддельные события остальным. Для соединения публикатора `auth` каналов не нужен:
 
 ```json
 {
   "type": "publish",
   "channel": "private.user.10",
   "event": "message",
-  "data": {"text": "hello"},
-  "auth": "app-1:signature"
+  "data": {"text": "hello"}
 }
 ```
 
@@ -132,7 +137,7 @@ use PhpSoftBox\Broadcaster\Channel\PrivateChannel;
 $publisher->publish(new PrivateChannel('admin.user.10'), 'phone.confirmed', ['user_id' => 10]);
 ```
 
-Для генерации `auth` можно использовать CLI:
+Для генерации `auth` подписки можно использовать CLI:
 
 ```bash
 php psb pushr:channel-auth --app-id=app-1 --secret=secret-1 --socket-id=socket-123 --channel=private.user.10

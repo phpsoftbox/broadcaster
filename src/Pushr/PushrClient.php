@@ -70,11 +70,12 @@ final class PushrClient implements PushrClientInterface
 
         try {
             $timestamp = time();
-            $signature = PushrSignature::generate($this->appId, $this->secret, $timestamp);
+            $signature = PushrSignature::generatePublisher($this->appId, $this->secret, $timestamp);
             $query     = http_build_query([
                 'app_id'    => $this->appId,
                 'timestamp' => $timestamp,
                 'signature' => $signature,
+                'role'      => 'publisher',
             ]);
 
             $key     = base64_encode(random_bytes(16));
@@ -142,29 +143,14 @@ final class PushrClient implements PushrClientInterface
         $this->send($message);
     }
 
-    public function publish(
-        string $channel,
-        string $event,
-        mixed $data = null,
-        ?string $auth = null,
-        mixed $channelData = null,
-    ): void {
-        $message = [
+    public function publish(string $channel, string $event, mixed $data = null): void
+    {
+        $this->send([
             'type'    => 'publish',
             'channel' => $channel,
             'event'   => $event,
             'data'    => $data,
-        ];
-
-        if ($auth !== null) {
-            $message['auth'] = $auth;
-        }
-
-        if ($channelData !== null) {
-            $message['channel_data'] = $channelData;
-        }
-
-        $this->send($message);
+        ]);
     }
 
     /**

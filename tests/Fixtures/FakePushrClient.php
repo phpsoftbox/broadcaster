@@ -15,7 +15,7 @@ final class FakePushrClient implements PushrClientInterface
     public int $closeCalls   = 0;
     public int $receiveCalls = 0;
 
-    /** @var list<array{channel:string,event:string,data:mixed,auth:?string,channelData:mixed}> */
+    /** @var list<array{channel:string,event:string,data:mixed}> */
     public array $publications = [];
 
     /** @var list<array<string, mixed>|null> */
@@ -33,23 +33,16 @@ final class FakePushrClient implements PushrClientInterface
         $this->closeCalls++;
     }
 
-    public function publish(
-        string $channel,
-        string $event,
-        mixed $data = null,
-        ?string $auth = null,
-        mixed $channelData = null,
-    ): void {
+    public function publish(string $channel, string $event, mixed $data = null): void
+    {
         if ($channel === $this->failOnChannel) {
             throw new RuntimeException('Test publication failure.');
         }
 
         $this->publications[] = [
-            'channel'     => $channel,
-            'event'       => $event,
-            'data'        => $data,
-            'auth'        => $auth,
-            'channelData' => $channelData,
+            'channel' => $channel,
+            'event'   => $event,
+            'data'    => $data,
         ];
     }
 

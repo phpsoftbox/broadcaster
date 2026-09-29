@@ -17,8 +17,8 @@ $event = $client->receive(1);
 ## Короткоживущая публикация из приложения
 
 `PushrPublisher` предназначен для случаев, когда приложение открывает соединение,
-отправляет событие и сразу его закрывает. Четыре независимых таймаута ограничивают
-ожидание подключения, WebSocket-handshake, получения `socket_id` и записи в сокет:
+отправляет событие и сразу его закрывает. Три независимых таймаута ограничивают
+ожидание подключения, WebSocket-handshake и записи в сокет:
 
 ```php
 use PhpSoftBox\Broadcaster\Pushr\PushrPublisher;
@@ -32,7 +32,6 @@ $publisher = new PushrPublisher(
     options: new PushrPublisherOptions(
         connectTimeoutSeconds: 0.5,
         handshakeTimeoutSeconds: 0.5,
-        readTimeoutSeconds: 0.5,
         writeTimeoutSeconds: 0.5,
     ),
 );
@@ -53,9 +52,8 @@ $publisher->publishMany(
 );
 ```
 
-Для всего списка используется одно подключение и один handshake. `socket_id`
-ожидается только при наличии `private.*` или `presence.*` канала; публичная
-публикация не тратит время на чтение приветственного сообщения.
+Для всего списка используется одно подключение и один handshake; `auth` каналов
+не нужен — соединение публикатора авторизовано подписью из секрета.
 
 ## Очередь и transactional outbox
 
@@ -107,9 +105,9 @@ $client->subscribe('presence.chat', $auth, $channelData);
 
 ## Публикация в приватные каналы
 
-Публикация в приватные каналы требует `auth`:
+`PushrClient` подключается как публикатор (`role=publisher`, подпись из секрета), поэтому публикует в любой канал
+приложения без `auth`:
 
 ```php
-$auth = PushrChannelAuth::token('app-1', 'secret-1', $socketId, 'private.user.10');
-$client->publish('private.user.10', 'message', ['text' => 'hello'], $auth);
+$client->publish('private.user.10', 'message', ['text' => 'hello']);
 ```

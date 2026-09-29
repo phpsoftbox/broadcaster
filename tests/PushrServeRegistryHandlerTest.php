@@ -70,6 +70,11 @@ final class PushrServeRegistryHandlerTest extends TestCase
             {
                 return new NullIo();
             }
+
+            public function environment(): string
+            {
+                return 'test';
+            }
         };
 
         try {
