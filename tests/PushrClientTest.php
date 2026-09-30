@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace PhpSoftBox\Broadcaster\Tests;
 
+use Closure;
 use PhpSoftBox\Broadcaster\Pushr\PushrClient;
 use PhpSoftBox\Broadcaster\Pushr\PushrPublisherOptions;
+use PhpSoftBox\Broadcaster\Pushr\WebSocketFrame;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\CoversMethod;
 use PHPUnit\Framework\Attributes\Test;
@@ -14,11 +16,16 @@ use RuntimeException;
 
 use function fclose;
 use function file_exists;
+use function fread;
+use function fwrite;
 use function microtime;
+use function pack;
 use function proc_close;
 use function proc_open;
 use function proc_terminate;
+use function stream_set_blocking;
 use function stream_socket_get_name;
+use function stream_socket_pair;
 use function stream_socket_server;
 use function strrpos;
 use function substr;
@@ -28,9 +35,13 @@ use function unlink;
 use function usleep;
 
 use const PHP_BINARY;
+use const STREAM_IPPROTO_IP;
+use const STREAM_PF_UNIX;
+use const STREAM_SOCK_STREAM;
 
 #[CoversClass(PushrClient::class)]
 #[CoversMethod(PushrClient::class, 'connect')]
+#[CoversMethod(PushrClient::class, 'receive')]
 final class PushrClientTest extends TestCase
 {
     /**
@@ -130,5 +141,89 @@ PHP;
                 unlink($readyPath);
             }
         }
+    }
+
+    /**
+     * Проверим, что на ping сервера клиент отвечает pong с тем же payload и продолжает отдавать сообщения.
+     *
+     * @see PushrClient::receive()
+     */
+    #[Test]
+    public function receiveAnswersServerPingWithPong(): void
+    {
+        [$client, $server] = $this->connectedClient();
+
+        try {
+            fwrite(
+                $server,
+                WebSocketFrame::encode('probe', false, WebSocketFrame::OPCODE_PING)
+                . WebSocketFrame::encode('{"type":"event","event":"tick"}', false),
+            );
+
+            self::assertSame(['type' => 'event', 'event' => 'tick'], $client->receive(0.5));
+
+            $pong = WebSocketFrame::decode((string) fread($server, 8192));
+            self::assertNotNull($pong);
+            self::assertSame(WebSocketFrame::OPCODE_PONG, $pong['opcode']);
+            self::assertSame('probe', $pong['payload']);
+        } finally {
+            $client->close();
+            fclose($server);
+        }
+    }
+
+    /**
+     * Проверим, что close-кадр сервера закрывает соединение клиента: ответный close отправлен, дальнейшая
+     * публикация требует переподключения.
+     *
+     * @see PushrClient::receive()
+     * @see PushrClient::publish()
+     */
+    #[Test]
+    public function receiveTreatsServerCloseFrameAsClosedConnection(): void
+    {
+        [$client, $server] = $this->connectedClient();
+
+        try {
+            fwrite($server, WebSocketFrame::encode(pack('n', 1001), false, WebSocketFrame::OPCODE_CLOSE));
+
+            self::assertNull($client->receive(0.5));
+
+            $close = WebSocketFrame::decode((string) fread($server, 8192));
+            self::assertNotNull($close);
+            self::assertSame(WebSocketFrame::OPCODE_CLOSE, $close['opcode']);
+            self::assertSame(pack('n', 1001), $close['payload']);
+
+            $this->expectExceptionObject(new RuntimeException('Pushr client is not connected.'));
+            $client->publish('news', 'message');
+        } finally {
+            fclose($server);
+        }
+    }
+
+    /**
+     * Клиент с уже установленным соединением поверх пары сокетов (handshake не нужен для разбора кадров).
+     *
+     * @return array{0:PushrClient, 1:resource}
+     */
+    private function connectedClient(): array
+    {
+        $pair = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+        if ($pair === false) {
+            self::markTestSkipped('stream_socket_pair is not available.');
+        }
+
+        stream_set_blocking($pair[0], false);
+        $client = new PushrClient('127.0.0.1', 8080, 'app-1', 'secret-1');
+
+        (Closure::bind(
+            static function (PushrClient $client, mixed $socket): void {
+                $client->socket = $socket;
+            },
+            null,
+            PushrClient::class,
+        ))($client, $pair[0]);
+
+        return [$client, $pair[1]];
     }
 }

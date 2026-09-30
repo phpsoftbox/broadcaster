@@ -42,6 +42,23 @@ final readonly class PushrServeRegistryHandler implements DaemonHandlerInterface
             throw new DaemonStartupException('Некорректный параметр --max-skew.', Response::INVALID_INPUT);
         }
 
+        $pingInterval = $runner->request()->option('ping-interval', 25);
+        if (!is_int($pingInterval) || $pingInterval < 0) {
+            throw new DaemonStartupException('Некорректный параметр --ping-interval.', Response::INVALID_INPUT);
+        }
+
+        $idleTimeout = $runner->request()->option('idle-timeout', 60);
+        if (!is_int($idleTimeout) || $idleTimeout < 0) {
+            throw new DaemonStartupException('Некорректный параметр --idle-timeout.', Response::INVALID_INPUT);
+        }
+
+        if ($pingInterval > 0 && $idleTimeout > 0 && $idleTimeout <= $pingInterval) {
+            throw new DaemonStartupException(
+                'Параметр --idle-timeout должен быть больше --ping-interval.',
+                Response::INVALID_INPUT,
+            );
+        }
+
         try {
             $options  = $runner->request()->options();
             $options  = is_array($options) ? $options : [];
@@ -55,7 +72,14 @@ final readonly class PushrServeRegistryHandler implements DaemonHandlerInterface
             'success',
         );
 
-        $server = new PushrServer($registry, trim($host), $port, $maxSkew);
+        $server = new PushrServer(
+            $registry,
+            trim($host),
+            $port,
+            $maxSkew,
+            pingInterval: $pingInterval,
+            idleTimeout: $idleTimeout,
+        );
 
         $server->run();
     }

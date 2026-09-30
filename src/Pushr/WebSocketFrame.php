@@ -17,6 +17,14 @@ use function unpack;
 
 final class WebSocketFrame
 {
+    public const int OPCODE_TEXT  = 0x1;
+    public const int OPCODE_CLOSE = 0x8;
+    public const int OPCODE_PING  = 0x9;
+    public const int OPCODE_PONG  = 0xA;
+
+    /** Максимальная длина payload control-кадра (close, ping, pong) по RFC 6455 §5.5. */
+    public const int MAX_CONTROL_PAYLOAD_BYTES = 125;
+
     /**
      * @param int|null $maxLength Максимальная длина payload; при превышении или некорректной (отрицательной
      *                            в 64-битном поле) длине — InvalidArgumentException.
@@ -81,10 +89,25 @@ final class WebSocketFrame
         ];
     }
 
-    public static function encode(string $payload, bool $masked): string
+    /**
+     * Кодирует кадр с FIN и указанным opcode (по умолчанию текстовый).
+     *
+     * @param int $opcode Opcode кадра 0x0–0xF; для control-кадров (0x8 и выше) payload не длиннее 125 байт.
+     *
+     * @throws InvalidArgumentException Некорректный opcode или слишком длинный payload control-кадра.
+     */
+    public static function encode(string $payload, bool $masked, int $opcode = self::OPCODE_TEXT): string
     {
+        if ($opcode < 0x0 || $opcode > 0xF) {
+            throw new InvalidArgumentException('WebSocket opcode must be in range 0x0-0xF.');
+        }
+
         $length = strlen($payload);
-        $first  = chr(0x81);
+        if ($opcode >= self::OPCODE_CLOSE && $length > self::MAX_CONTROL_PAYLOAD_BYTES) {
+            throw new InvalidArgumentException('WebSocket control frame payload must not exceed 125 bytes.');
+        }
+
+        $first = chr(0x80 | $opcode);
 
         if ($length <= 125) {
             $header = chr(($masked ? 0x80 : 0x00) | $length);
