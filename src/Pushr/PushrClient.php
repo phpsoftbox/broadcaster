@@ -163,7 +163,7 @@ final class PushrClient implements PushrClientInterface
         }
 
         $message = $this->decodeBufferedMessage();
-        if ($message !== null) {
+        if ($message !== null || $this->socket === null) {
             return $message;
         }
 
@@ -175,7 +175,7 @@ final class PushrClient implements PushrClientInterface
         if ($data !== '') {
             $this->buffer .= $data;
             $message = $this->decodeBufferedMessage();
-            if ($message !== null) {
+            if ($message !== null || $this->socket === null) {
                 return $message;
             }
         }
@@ -203,17 +203,37 @@ final class PushrClient implements PushrClientInterface
         return $this->decodeBufferedMessage();
     }
 
-    /** @return array<string, mixed>|null */
+    /**
+     * Разбирает буфер до первого JSON-сообщения. На ping сервера отвечает pong с тем же payload; close-кадр
+     * сервера закрывает соединение (после него receive() возвращает null, публикация требует connect()).
+     *
+     * @return array<string, mixed>|null
+     */
     private function decodeBufferedMessage(): ?array
     {
-        while (true) {
+        while ($this->socket !== null) {
             $frame = WebSocketFrame::decode($this->buffer);
             if ($frame === null) {
                 return null;
             }
 
             $this->buffer = substr($this->buffer, $frame['frameLength']);
-            if ($frame['opcode'] !== 1) {
+            if ($frame['opcode'] === WebSocketFrame::OPCODE_PING) {
+                $this->writeNonBlocking(
+                    $this->socket,
+                    WebSocketFrame::encode($frame['payload'], true, WebSocketFrame::OPCODE_PONG),
+                );
+
+                continue;
+            }
+
+            if ($frame['opcode'] === WebSocketFrame::OPCODE_CLOSE) {
+                $this->acknowledgeClose($frame['payload']);
+
+                return null;
+            }
+
+            if ($frame['opcode'] !== WebSocketFrame::OPCODE_TEXT) {
                 continue;
             }
 
@@ -224,6 +244,25 @@ final class PushrClient implements PushrClientInterface
                 return $decoded;
             }
         }
+
+        return null;
+    }
+
+    /**
+     * Отвечает на close сервера тем же кодом (без ожидания доставки) и закрывает сокет.
+     */
+    private function acknowledgeClose(string $payload): void
+    {
+        try {
+            $this->writeNonBlocking(
+                $this->socket,
+                WebSocketFrame::encode(substr($payload, 0, 2), true, WebSocketFrame::OPCODE_CLOSE),
+            );
+        } catch (Throwable) {
+            // Сервер уже закрывает соединение: недоставленный ответный close не ошибка.
+        }
+
+        $this->close();
     }
 
     /**

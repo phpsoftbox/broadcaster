@@ -10,6 +10,8 @@
 - подписи каналов `PushrChannelAuth`
 - реестр каналов `ChannelRegistry`
 - поддержка каналов (rooms), включая приватные
+- keepalive: ping простаивающим соединениям (`pingInterval`, 25 с), закрытие молчащих дольше `idleTimeout` (60 с),
+  прикладной ping `{"type":"ping"}` → `{"type":"pong"}` — см. [Server](docs/04-server.md#keepalive)
 
 ## Quick Start
 Запуск сервера:
@@ -25,6 +27,10 @@ $registry = new PushrAppRegistry([
 $server = new PushrServer($registry, host: '0.0.0.0', port: 8080);
 $server->run();
 ```
+
+Сервер закрывает соединения, не присылающие ни одного кадра дольше `idleTimeout` (60 с); браузеры и стандартные
+WebSocket-библиотеки держат соединение, отвечая на ping сервера. `idleTimeout: 0` (`--idle-timeout=0`) отключает
+закрытие.
 
 Подключение клиентом:
 

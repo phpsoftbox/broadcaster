@@ -6,6 +6,7 @@ namespace PhpSoftBox\Broadcaster\Pushr;
 
 use InvalidArgumentException;
 use JsonException;
+use Psr\Clock\ClockInterface;
 use RuntimeException;
 
 use function array_shift;
@@ -20,6 +21,7 @@ use function hash;
 use function is_array;
 use function json_decode;
 use function json_encode;
+use function pack;
 use function parse_str;
 use function parse_url;
 use function random_bytes;
@@ -45,6 +47,8 @@ final class PushrServer
     private const int HANDSHAKE_TIMEOUT_SECONDS = 5;
     private const int MAX_HANDSHAKE_BYTES       = 16384;
     private const int MAX_FRAME_BYTES           = 1048576;
+    private const int CLOSE_GOING_AWAY          = 1001;
+    private const int CLOSE_PROTOCOL_ERROR      = 1002;
 
     /** @var array<int, PushrConnection> */
     private array $clients = [];
@@ -60,7 +64,25 @@ final class PushrServer
         private readonly string $host = '0.0.0.0',
         private readonly int $port = 8080,
         private readonly int $maxSkew = 300,
+        /** Секунды без входящих кадров, после которых соединению отправляется ping; 0 — не отправлять. */
+        private readonly int $pingInterval = 25,
+        /** Секунды без входящих кадров, после которых соединение закрывается (1001); 0 — не закрывать. */
+        private readonly int $idleTimeout = 60,
+        /** Лимит очереди исходящих байт соединения: клиент, который не читает данные, отключается. */
+        private readonly int $maxOutgoingBytes = 4194304,
+        private readonly ?ClockInterface $clock = null,
     ) {
+        if ($pingInterval < 0 || $idleTimeout < 0) {
+            throw new InvalidArgumentException('Pushr pingInterval and idleTimeout must not be negative.');
+        }
+
+        if ($pingInterval > 0 && $idleTimeout > 0 && $idleTimeout <= $pingInterval) {
+            throw new InvalidArgumentException('Pushr idleTimeout must be greater than pingInterval.');
+        }
+
+        if ($maxOutgoingBytes < 1) {
+            throw new InvalidArgumentException('Pushr maxOutgoingBytes must be positive.');
+        }
     }
 
     public function run(): void
@@ -74,16 +96,21 @@ final class PushrServer
 
         while (true) {
             $this->dropExpiredHandshakes();
+            $this->keepalive();
 
             $read = [$server];
             foreach ($this->handshakes as $handshake) {
                 $read[] = $handshake['socket'];
             }
+            $write = [];
             foreach ($this->clients as $client) {
                 $read[] = $client->socket;
+                if ($client->hasPendingOutput()) {
+                    $write[] = $client->socket;
+                }
             }
 
-            $write  = null;
+            $write  = $write === [] ? null : $write;
             $except = null;
             if (stream_select($read, $write, $except, 1) === false) {
                 continue;
@@ -108,7 +135,50 @@ final class PushrServer
 
                 $this->readClient($client);
             }
+
+            foreach ($write ?? [] as $socket) {
+                // Соединение могло закрыться при чтении выше.
+                $client = $this->findClientBySocket($socket);
+                if ($client !== null) {
+                    $this->flush($client);
+                }
+            }
         }
+    }
+
+    /**
+     * Проверка keepalive, вызывается из цикла run(): простаивающим pingInterval секунд соединениям отправляет ping
+     * (не чаще одного за интервал), молчащие idleTimeout секунд закрывает кадром 1001 (going away).
+     */
+    private function keepalive(): void
+    {
+        if ($this->pingInterval === 0 && $this->idleTimeout === 0) {
+            return;
+        }
+
+        $now = $this->now();
+        foreach ($this->clients as $client) {
+            $idle = $now - $client->lastSeenAt;
+            if ($this->idleTimeout > 0 && $idle >= $this->idleTimeout) {
+                $this->close($client, pack('n', self::CLOSE_GOING_AWAY));
+
+                continue;
+            }
+
+            if ($this->pingInterval === 0 || $idle < $this->pingInterval) {
+                continue;
+            }
+
+            if ($now - $client->lastPingAt >= $this->pingInterval) {
+                $client->lastPingAt = $now;
+                $this->write($client, WebSocketFrame::encode('', false, WebSocketFrame::OPCODE_PING));
+            }
+        }
+    }
+
+    private function now(): int
+    {
+        return $this->clock?->now()->getTimestamp() ?? time();
     }
 
     /**
@@ -127,7 +197,7 @@ final class PushrServer
         $this->handshakes[(int) $socket] = [
             'socket'   => $socket,
             'buffer'   => '',
-            'deadline' => time() + self::HANDSHAKE_TIMEOUT_SECONDS,
+            'deadline' => $this->now() + self::HANDSHAKE_TIMEOUT_SECONDS,
         ];
     }
 
@@ -171,7 +241,7 @@ final class PushrServer
 
     private function dropExpiredHandshakes(): void
     {
-        $now = time();
+        $now = $this->now();
         foreach ($this->handshakes as $key => $handshake) {
             if ($handshake['deadline'] >= $now) {
                 continue;
@@ -210,9 +280,10 @@ final class PushrServer
                 return;
             }
 
-            $client->buffer = substr($client->buffer, $frame['frameLength']);
+            $client->buffer     = substr($client->buffer, $frame['frameLength']);
+            $client->lastSeenAt = $this->now();
             $this->handleFrame($client, $frame['opcode'], $frame['payload']);
-            if (!isset($this->clients[(int) $client->socket])) {
+            if ($client->closed) {
                 return;
             }
         }
@@ -266,14 +337,15 @@ final class PushrServer
         fwrite($socket, $response);
 
         $id     = bin2hex(random_bytes(8));
-        $client = new PushrConnection($socket, $id, $appId, $publisher);
+        $now    = $this->now();
+        $client = new PushrConnection($socket, $id, $appId, $publisher, $now);
 
         $this->clients[(int) $socket] = $client;
 
         $this->send($client, [
             'type'      => 'connection',
             'socket_id' => $id,
-            'timestamp' => time(),
+            'timestamp' => $now,
         ]);
     }
 
@@ -310,13 +382,27 @@ final class PushrServer
 
     private function handleFrame(PushrConnection $client, int $opcode, string $payload): void
     {
-        if ($opcode === 8) {
-            $this->close($client);
+        if ($opcode === WebSocketFrame::OPCODE_CLOSE) {
+            // Ответный close с кодом клиента (RFC 6455 §5.5.1); без кода — пустой payload.
+            $this->close($client, substr($payload, 0, 2));
 
             return;
         }
 
-        if ($opcode !== 1) {
+        if ($opcode === WebSocketFrame::OPCODE_PING) {
+            if (strlen($payload) > WebSocketFrame::MAX_CONTROL_PAYLOAD_BYTES) {
+                $this->close($client, pack('n', self::CLOSE_PROTOCOL_ERROR));
+
+                return;
+            }
+
+            $this->write($client, WebSocketFrame::encode($payload, false, WebSocketFrame::OPCODE_PONG));
+
+            return;
+        }
+
+        if ($opcode !== WebSocketFrame::OPCODE_TEXT) {
+            // pong и прочие opcode: достаточно обновлённого lastSeenAt.
             return;
         }
 
@@ -333,6 +419,13 @@ final class PushrServer
         }
 
         $type = $data['type'] ?? null;
+        if ($type === 'ping') {
+            // Прикладной ping для клиентов без доступа к control-кадрам (браузер).
+            $this->send($client, ['type' => 'pong']);
+
+            return;
+        }
+
         if ($type === 'subscribe' && isset($data['channel'])) {
             $channel     = (string) $data['channel'];
             $auth        = isset($data['auth']) ? (string) $data['auth'] : null;
@@ -452,12 +545,50 @@ final class PushrServer
             return;
         }
 
-        $frame = WebSocketFrame::encode($payload, false);
-        @fwrite($client->socket, $frame);
+        $this->write($client, WebSocketFrame::encode($payload, false));
     }
 
-    private function close(PushrConnection $client): void
+    /**
+     * Ставит кадр в очередь соединения. Ошибка записи или переполнение очереди (клиент не читает) закрывают его.
+     */
+    private function write(PushrConnection $client, string $frame): bool
     {
+        if ($client->closed) {
+            return false;
+        }
+
+        if (!$client->queue($frame) || strlen($client->outgoing) > $this->maxOutgoingBytes) {
+            $this->close($client);
+
+            return false;
+        }
+
+        return true;
+    }
+
+    private function flush(PushrConnection $client): void
+    {
+        if (!$client->flush()) {
+            $this->close($client);
+        }
+    }
+
+    /**
+     * @param string|null $closePayload payload close-кадра, отправляемого перед закрытием без ожидания доставки;
+     *                                  null — закрыть без кадра
+     */
+    private function close(PushrConnection $client, ?string $closePayload = null): void
+    {
+        if ($client->closed) {
+            return;
+        }
+
+        if ($closePayload !== null) {
+            $client->queue(WebSocketFrame::encode($closePayload, false, WebSocketFrame::OPCODE_CLOSE));
+        }
+
+        $client->closed = true;
+
         foreach ($client->channels as $channel => $_) {
             unset($this->channels[$client->appId][$channel][$client->id]);
             if (isset($this->channels[$client->appId][$channel]) && $this->channels[$client->appId][$channel] === []) {
