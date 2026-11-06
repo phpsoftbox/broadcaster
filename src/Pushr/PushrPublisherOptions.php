@@ -12,6 +12,8 @@ final readonly class PushrPublisherOptions
         public float $connectTimeoutSeconds = 1.0,
         public float $handshakeTimeoutSeconds = 1.0,
         public float $writeTimeoutSeconds = 1.0,
+        /** How long close() waits for the close frame of the server: until it, the published frames may still be unread. */
+        public float $closeTimeoutSeconds = 1.0,
     ) {
         if ($this->connectTimeoutSeconds <= 0) {
             throw new InvalidArgumentException('Pushr connect timeout must be greater than zero.');
@@ -23,6 +25,10 @@ final readonly class PushrPublisherOptions
 
         if ($this->writeTimeoutSeconds <= 0) {
             throw new InvalidArgumentException('Pushr write timeout must be greater than zero.');
+        }
+
+        if ($this->closeTimeoutSeconds <= 0) {
+            throw new InvalidArgumentException('Pushr close timeout must be greater than zero.');
         }
     }
 }

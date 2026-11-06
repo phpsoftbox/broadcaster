@@ -17,6 +17,7 @@ use function is_array;
 use function json_decode;
 use function json_encode;
 use function microtime;
+use function pack;
 use function preg_match;
 use function random_bytes;
 use function sprintf;
@@ -116,7 +117,64 @@ final class PushrClient implements PushrClientInterface
         }
     }
 
+    /**
+     * Закрывающее рукопожатие WebSocket: close-кадр и ожидание ответного close сервера (не дольше
+     * `closeTimeoutSeconds`). Сервер разбирает кадры по порядку, поэтому к его ответу все отправленные публикации
+     * уже обработаны. Без рукопожатия сокет закрывался с непрочитанным приветствием сервера: ядро отвечало RST, и
+     * сервер терял ещё не прочитанные кадры — из нескольких публикаций доходила только первая.
+     */
     public function close(): void
+    {
+        if ($this->socket === null) {
+            return;
+        }
+
+        try {
+            $this->writeNonBlocking($this->socket, WebSocketFrame::encode(pack('n', 1000), true, WebSocketFrame::OPCODE_CLOSE));
+            $this->awaitServerClose();
+        } catch (Throwable) {
+            // The connection is already broken: nothing is left to deliver.
+        }
+
+        $this->closeSocket();
+    }
+
+    /** Читает входящие кадры до close сервера или конца потока; ping по пути не обязателен к ответу. */
+    private function awaitServerClose(): void
+    {
+        $deadline = microtime(true) + $this->options->closeTimeoutSeconds;
+        while ($this->socket !== null) {
+            while (($frame = WebSocketFrame::decode($this->buffer)) !== null) {
+                $this->buffer = substr($this->buffer, $frame['frameLength']);
+                if ($frame['opcode'] === WebSocketFrame::OPCODE_CLOSE) {
+                    return;
+                }
+            }
+
+            $remaining = $deadline - microtime(true);
+            if ($remaining <= 0) {
+                return;
+            }
+
+            $read                     = [$this->socket];
+            $write                    = null;
+            $except                   = null;
+            [$seconds, $microseconds] = $this->splitTimeout($remaining);
+            if (stream_select($read, $write, $except, $seconds, $microseconds) < 1) {
+                return;
+            }
+
+            $data = fread($this->socket, 8192);
+            if ($data === '' || $data === false) {
+                // The server closed the stream: its side is done.
+                return;
+            }
+
+            $this->buffer .= $data;
+        }
+    }
+
+    private function closeSocket(): void
     {
         if ($this->socket !== null) {
             fclose($this->socket);
@@ -262,7 +320,7 @@ final class PushrClient implements PushrClientInterface
             // Сервер уже закрывает соединение: недоставленный ответный close не ошибка.
         }
 
-        $this->close();
+        $this->closeSocket();
     }
 
     /**
