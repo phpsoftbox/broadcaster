@@ -202,11 +202,75 @@ PHP;
     }
 
     /**
+     * Проверим закрывающее рукопожатие: после публикаций клиент шлёт close 1000 и ждёт ответный close сервера —
+     * к его ответу сервер прочитал все публикации, а сокет закрывается без непрочитанных данных (без RST).
+     *
+     * @see PushrClient::close()
+     */
+    #[Test]
+    public function closePerformsWebSocketClosingHandshakeAfterPublications(): void
+    {
+        [$client, $server] = $this->connectedClient();
+
+        try {
+            // The greeting of the server is not read by a publisher; the answer to its close is already waiting.
+            fwrite($server, WebSocketFrame::encode('{"type":"connection","socket_id":"1"}', false)
+                . WebSocketFrame::encode(pack('n', 1000), false, WebSocketFrame::OPCODE_CLOSE));
+            $client->publish('first', 'message');
+            $client->publish('second', 'message');
+
+            $started = microtime(true);
+            $client->close();
+            self::assertLessThan(0.5, microtime(true) - $started);
+
+            $received = (string) fread($server, 8192);
+            $opcodes  = [];
+            $payloads = [];
+            while (($frame = WebSocketFrame::decode($received)) !== null) {
+                $received   = substr($received, $frame['frameLength']);
+                $opcodes[]  = $frame['opcode'];
+                $payloads[] = $frame['payload'];
+            }
+            self::assertSame([WebSocketFrame::OPCODE_TEXT, WebSocketFrame::OPCODE_TEXT, WebSocketFrame::OPCODE_CLOSE], $opcodes);
+            self::assertStringContainsString('"channel":"second"', $payloads[1]);
+            self::assertSame(pack('n', 1000), $payloads[2]);
+
+            $this->expectExceptionObject(new RuntimeException('Pushr client is not connected.'));
+            $client->publish('third', 'message');
+        } finally {
+            fclose($server);
+        }
+    }
+
+    /**
+     * Проверим, что сервер без ответного close не задерживает клиента дольше `closeTimeoutSeconds`.
+     *
+     * @see PushrClient::close()
+     */
+    #[Test]
+    public function closeStopsWaitingForServerAfterCloseTimeout(): void
+    {
+        [$client, $server] = $this->connectedClient(new PushrPublisherOptions(closeTimeoutSeconds: 0.2));
+
+        try {
+            $started = microtime(true);
+            $client->close();
+            $elapsed = microtime(true) - $started;
+
+            self::assertGreaterThanOrEqual(0.15, $elapsed);
+            self::assertLessThan(0.8, $elapsed);
+            self::assertNull($client->receive());
+        } finally {
+            fclose($server);
+        }
+    }
+
+    /**
      * Клиент с уже установленным соединением поверх пары сокетов (handshake не нужен для разбора кадров).
      *
      * @return array{0:PushrClient, 1:resource}
      */
-    private function connectedClient(): array
+    private function connectedClient(?PushrPublisherOptions $options = null): array
     {
         $pair = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
         if ($pair === false) {
@@ -214,7 +278,7 @@ PHP;
         }
 
         stream_set_blocking($pair[0], false);
-        $client = new PushrClient('127.0.0.1', 8080, 'app-1', 'secret-1');
+        $client = new PushrClient('127.0.0.1', 8080, 'app-1', 'secret-1', '/', $options ?? new PushrPublisherOptions());
 
         (Closure::bind(
             static function (PushrClient $client, mixed $socket): void {
